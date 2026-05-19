@@ -176,7 +176,7 @@ docker-compose up
 - Check existing issues
 - Read the documentation
 - Ask in discussions
-- Email: dev@nexusfootball.com
+- Email: mcjezzl@gmail.com
 
 ## License
 
