@@ -1,0 +1,27 @@
+{
+  "$schema": "https://vercel.com/schemas/vercel.json",
+  "version": 2,
+  "name": "⚽ NEXUS FOOTBALL",
+  "builds": [
+    {
+      "src": "frontend/package.json",
+      "use": "@vercel/next"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "/index.html"
+    }
+  ],
+  "env": {
+    "REACT_APP_API_URL": "@api_url",
+    "REACT_APP_ENV": "@environment"
+  },
+  "git": {
+    "deploymentEnabled": {
+      "main": true,
+      "develop": true
+    }
+  }
+}

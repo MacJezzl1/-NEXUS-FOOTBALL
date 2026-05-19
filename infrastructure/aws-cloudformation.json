@@ -1,0 +1,229 @@
+"""
+AWS CloudFormation Template for NEXUS FOOTBALL
+Deploy backend to AWS ECS, frontend to CloudFront + S3
+"""
+
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "⚽ NEXUS FOOTBALL — World Cup 2026 Intelligence Platform",
+  
+  "Parameters": {
+    "EnvironmentName": {
+      "Type": "String",
+      "Default": "production",
+      "AllowedValues": ["development", "staging", "production"]
+    },
+    "DockerImageBackend": {
+      "Type": "String",
+      "Default": "nexus-football-backend:latest"
+    },
+    "DockerImageFrontend": {
+      "Type": "String",
+      "Default": "nexus-football-frontend:latest"
+    }
+  },
+
+  "Resources": {
+    # ━━━━━ VPC & NETWORKING ━━━━━
+    "NexusVPC": {
+      "Type": "AWS::EC2::VPC",
+      "Properties": {
+        "CidrBlock": "10.0.0.0/16",
+        "EnableDnsHostnames": true,
+        "EnableDnsSupport": true,
+        "Tags": [{"Key": "Name", "Value": "nexus-football-vpc"}]
+      }
+    },
+
+    "PublicSubnet1": {
+      "Type": "AWS::EC2::Subnet",
+      "Properties": {
+        "VpcId": {"Ref": "NexusVPC"},
+        "CidrBlock": "10.0.1.0/24",
+        "AvailabilityZone": {"Fn::Select": [0, {"Fn::GetAZs": ""}]},
+        "MapPublicIpOnLaunch": true
+      }
+    },
+
+    # ━━━━━ RDS DATABASE ━━━━━
+    "NexusDBSubnetGroup": {
+      "Type": "AWS::RDS::DBSubnetGroup",
+      "Properties": {
+        "DBSubnetGroupDescription": "Subnet group for Nexus Football DB",
+        "SubnetIds": [{"Ref": "PublicSubnet1"}]
+      }
+    },
+
+    "NexusPostgresDB": {
+      "Type": "AWS::RDS::DBInstance",
+      "Properties": {
+        "DBName": "nexus_football",
+        "Engine": "postgres",
+        "EngineVersion": "16.0",
+        "DBInstanceClass": "db.t3.micro",
+        "AllocatedStorage": 20,
+        "StorageType": "gp3",
+        "MasterUsername": "nexus",
+        "MasterUserPassword": {"Ref": "DBPassword"},
+        "DBSubnetGroupName": {"Ref": "NexusDBSubnetGroup"},
+        "MultiAZ": false,
+        "BackupRetentionPeriod": 30,
+        "PreferredBackupWindow": "03:00-04:00",
+        "PreferredMaintenanceWindow": "sun:04:00-sun:05:00"
+      }
+    },
+
+    # ━━━━━ ELASTICACHE REDIS ━━━━━
+    "NexusRedisSubnetGroup": {
+      "Type": "AWS::ElastiCache::SubnetGroup",
+      "Properties": {
+        "Description": "Subnet group for Nexus Redis",
+        "SubnetIds": [{"Ref": "PublicSubnet1"}]
+      }
+    },
+
+    "NexusRedisCluster": {
+      "Type": "AWS::ElastiCache::ReplicationGroup",
+      "Properties": {
+        "Engine": "redis",
+        "EngineVersion": "7.0",
+        "ReplicationGroupDescription": "Redis cache for Nexus Football",
+        "CacheNodeType": "cache.t3.micro",
+        "NumCacheClusters": 2,
+        "AutomaticFailoverEnabled": true,
+        "CacheSubnetGroupName": {"Ref": "NexusRedisSubnetGroup"}
+      }
+    },
+
+    # ━━━━━ ECS CLUSTER ━━━━━
+    "NexusECSCluster": {
+      "Type": "AWS::ECS::Cluster",
+      "Properties": {
+        "ClusterName": "nexus-football-cluster",
+        "ClusterSettings": [
+          {
+            "Name": "containerInsights",
+            "Value": "enabled"
+          }
+        ]
+      }
+    },
+
+    # ━━━━━ ECS TASK DEFINITION (Backend) ━━━━━
+    "BackendTaskDefinition": {
+      "Type": "AWS::ECS::TaskDefinition",
+      "Properties": {
+        "Family": "nexus-football-backend",
+        "NetworkMode": "awsvpc",
+        "RequiresCompatibilities": ["FARGATE"],
+        "Cpu": "256",
+        "Memory": "512",
+        "ContainerDefinitions": [
+          {
+            "Name": "backend",
+            "Image": {"Ref": "DockerImageBackend"},
+            "PortMappings": [
+              {
+                "ContainerPort": 8000,
+                "Protocol": "tcp"
+              }
+            ],
+            "Environment": [
+              {
+                "Name": "DATABASE_URL",
+                "Value": {
+                  "Fn::Sub": "postgresql://nexus:${DBPassword}@${NexusPostgresDB.Endpoint.Address}:5432/nexus_football"
+                }
+              },
+              {
+                "Name": "REDIS_URL",
+                "Value": {
+                  "Fn::Sub": "redis://${NexusRedisCluster.RedisEndpoint.Address}:6379"
+                }
+              }
+            ],
+            "LogConfiguration": {
+              "LogDriver": "awslogs",
+              "Options": {
+                "awslogs-group": {"Ref": "BackendLogGroup"},
+                "awslogs-region": {"Ref": "AWS::Region"},
+                "awslogs-stream-prefix": "ecs"
+              }
+            }
+          }
+        ]
+      }
+    },
+
+    # ━━━━━ S3 BUCKET (Frontend) ━━━━━
+    "FrontendBucket": {
+      "Type": "AWS::S3::Bucket",
+      "Properties": {
+        "BucketName": {"Fn::Sub": "nexus-football-frontend-${AWS::AccountId}"},
+        "BucketEncryption": {
+          "ServerSideEncryptionConfiguration": [
+            {
+              "ServerSideEncryptionByDefault": {
+                "SSEAlgorithm": "AES256"
+              }
+            }
+          ]
+        },
+        "PublicAccessBlockConfiguration": {
+          "BlockPublicAcls": true,
+          "BlockPublicPolicy": true,
+          "IgnorePublicAcls": true,
+          "RestrictPublicBuckets": true
+        }
+      }
+    },
+
+    # ━━━━━ CLOUDFRONT DISTRIBUTION ━━━━━
+    "FrontendDistribution": {
+      "Type": "AWS::CloudFront::Distribution",
+      "Properties": {
+        "DistributionConfig": {
+          "Enabled": true,
+          "DefaultRootObject": "index.html",
+          "Origins": [
+            {
+              "Id": "S3Origin",
+              "DomainName": {"Fn::GetAtt": ["FrontendBucket", "DomainName"]},
+              "S3OriginConfig": {}
+            }
+          ],
+          "DefaultCacheBehavior": {
+            "AllowedMethods": ["GET", "HEAD"],
+            "CachePolicyId": "658327ea-f89d-4fab-a63d-7e88639e58f6",
+            "TargetOriginId": "S3Origin",
+            "ViewerProtocolPolicy": "redirect-to-https"
+          }
+        }
+      }
+    },
+
+    # ━━━━━ CLOUDWATCH LOGS ━━━━━
+    "BackendLogGroup": {
+      "Type": "AWS::Logs::LogGroup",
+      "Properties": {
+        "LogGroupName": "/ecs/nexus-football-backend",
+        "RetentionInDays": 30
+      }
+    }
+  },
+
+  "Outputs": {
+    "DatabaseEndpoint": {
+      "Value": {"Fn::GetAtt": ["NexusPostgresDB", "Endpoint.Address"]},
+      "Description": "Database endpoint"
+    },
+    "RedisEndpoint": {
+      "Value": {"Fn::GetAtt": ["NexusRedisCluster", "RedisEndpoint.Address"]},
+      "Description": "Redis endpoint"
+    },
+    "CloudFrontURL": {
+      "Value": {"Fn::GetAtt": ["FrontendDistribution", "DomainName"]},
+      "Description": "CloudFront distribution URL"
+    }
+  }
+}
